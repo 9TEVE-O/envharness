@@ -1,0 +1,105 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# WebArena corpus -- reduced-scale variant of corpus.yaml.
+
+bridge:
+  import_path: envharness.bridges.webarena:WebArenaEnv
+  reset_options:
+    headless: true
+    obs_style: wrapped
+    viewport:
+      width: 1280
+      height: 900
+
+mutator:
+  type: llm
+  client_factory: envharness.infra.llm:LiteLLMClient
+  client_kwargs:
+    model: openai/gpt-4.1-mini
+  extra_instructions: |
+    Do NOT override modify_reward (R axis). Success is determined by the
+    WebArena task's authoritative scorer (browsergym sets reward=1.0 on
+    the terminal step iff the official evaluator passed).
+
+    ALWAYS attempt a mutation on EVERY task. Do NOT skip any task,
+    regardless of baseline success rate. Use MutatorContext.baseline
+    to calibrate perturbation magnitude:
+      - High baseline SR (>= 0.8): make it HARDER (exercise recovery
+        from novel failure modes).
+      - Low baseline SR (< 0.3): make it EASIER (use in_env_actions
+        to pre-navigate, pre-scroll, pre-fill).
+
+    S0 changes (pre-navigation, pre-filling) go ONLY through
+    in_env_actions (the Setup layer). Rules code must NOT modify
+    initial state — it handles only A (filter_action),
+    O (filter_observation), and T (modify_transition) axes.
+
+    REALISM RULE: nothing the Policy sees during a mutated rollout may be
+    something that could NOT show up in a standard, unmutated WebArena run.
+    Do not inject coaching text into obs.text. Do not change goal_text.
+    Do not modify reward. Subtractive O-axis (trim, dedup, reorder) is
+    safe; pre-navigation via in_env_actions is safe.
+
+policy:
+  client_factory: envharness.infra.llm:LiteLLMClient
+  client_kwargs:
+    model: openai/gpt-4.1-mini
+  action_format: webarena_rb
+  temperature: 0.7
+  prompt_builder_kwargs:
+    max_response_tokens: 65536
+
+objective:
+  type: difficulty_zone
+  target_band: [0.4, 0.6]
+  window: 20
+
+budget:
+  type: capped_adaptive
+  max_k: 1
+
+orchestrator:
+  task_id: webarena-corpus
+  task_description: |
+    Solve a WebArena task by emitting browsergym high-level actions one per
+    turn until the page reflects task completion. The Mutator reshapes the
+    env (S0 / A / O / T axes) to bring SR into the target band.
+  n_iterations: 20
+  max_episode_steps: 30
+  k_per_candidate: 3
+  base_seed: 0
+  task_id_stride: 1
+  task_id_base_offset: 0
+  skip_passthrough_candidates: false
+  compute_baseline: true
+  # MUST be null for corpus generation: with a shared cache dir, a cache HIT
+  # returns only the baseline snapshot and SKIPS emitting the baseline
+  # trajectories to the trace store (orchestrator.py ~L784). The orig bank
+  # is induced from those baseline trajectories, so a cached run yields an
+  # (near-)empty orig bank. null forces a fresh baseline roll per task that
+  # emits kind="baseline" traces -- what the orig bank needs.
+  baseline_cache_dir: null
+
+runner:
+  type: subprocess
+  timeout_seconds: 900
+
+storage:
+  trace_path: ./runs/{run_name}/traces.jsonl
+
+logging:
+  log_dir: ./runs/{run_name}
+  log_policy_calls: true
+  log_mutator_calls: true

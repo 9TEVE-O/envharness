@@ -1,0 +1,215 @@
+diff --git a/agent_system/environments/env_manager.py b/agent_system/environments/env_manager.py
+index ab09dff..2c0c19b 100644
+--- a/agent_system/environments/env_manager.py
++++ b/agent_system/environments/env_manager.py
+@@ -628,6 +628,112 @@ def make_envs(config):
+         val_envs = GymCardEnvironmentManager(_val_envs, projection_f, config)
+         return envs, val_envs
+     elif "alfworld" in config.env.env_name.lower():
++        # Route to the release_version_rl adapter if env_name starts with
++        # `envharness_rl/alfworld`. This is ADDITIVE: the legacy
++        # `envharness/alfworld` route below is untouched (active runs depend
++        # on it). The new route builds envs from release_version's
++        # ActionableEnv + Rules harness instead of the old AlfworldBridge +
++        # MutationLayer; both `release_version/` and `release_version_rl/`
++        # must be on PYTHONPATH (the launcher script adds them).
++        if config.env.env_name.lower().startswith("envharness_rl/alfworld"):
++            import sys as _sys
++            from pathlib import Path as _Path
++            _repo_root = _Path(__file__).resolve().parents[3]
++            for _p in (_repo_root / "release_version",
++                       _repo_root / "release_version_rl"):
++                if str(_p) not in _sys.path:
++                    _sys.path.insert(0, str(_p))
++            from envharness_rl.alfworld import (
++                build_envharness_alfworld_envs, envharness_alfworld_projection,
++            )
++            alf_config_path = os.path.join(os.path.dirname(__file__),
++                'env_package/alfworld/configs/config_tw.yaml')
++            env_kwargs = {
++                'eval_dataset': config.env.alfworld.eval_dataset,
++                # Restrict TRAIN to a small game_file subset (one JSONL line
++                # per {"game_file": ...}). Gated on is_train inside
++                # EnvharnessAlfworldEnvs so eval splits keep the full set.
++                'train_subset_path': os.environ.get('ALFWORLD_TRAIN_SUBSET_PATH'),
++                # Per-game Rules corpus (rules_code + in_env_actions) built by
++                # release_version_rl/scripts/build_corpus.py. Train-only; eval
++                # workers always use the vanilla env so SR stays comparable to
++                # the unmutated baseline.
++                'mutation_corpus_path': os.environ.get('ENVHARNESS_MUTATION_CORPUS'),
++                'subset_authoritative': os.environ.get(
++                    'ENVHARNESS_SUBSET_AUTHORITATIVE', '').lower()
++                    in ('1', 'true', 'yes'),
++            }
++            _envs = build_envharness_alfworld_envs(
++                alf_config_path, config.env.seed,
++                config.data.train_batch_size, group_n,
++                is_train=True, env_kwargs=env_kwargs,
++                resources_per_worker=resources_per_worker)
++            _val_envs = build_envharness_alfworld_envs(
++                alf_config_path, config.env.seed + 1000,
++                config.data.val_batch_size, 1,
++                is_train=False, env_kwargs=env_kwargs,
++                resources_per_worker=resources_per_worker)
++            projection_f = partial(envharness_alfworld_projection)
++            envs = AlfWorldEnvironmentManager(_envs, projection_f, config)
++            val_envs = AlfWorldEnvironmentManager(_val_envs, projection_f, config)
++            return envs, val_envs
++
++        # Route to EnvHarness-backed adapter if env_name starts with `envharness/`.
++        # Otherwise fall through to verl-agent's stock alfworld path.
++        if config.env.env_name.lower().startswith("envharness/alfworld"):
++            # Lazy-import so plain verl-agent runs don't require EnvHarness on PATH.
++            import sys as _sys
++            from pathlib import Path as _Path
++            _envharness_root = _Path(__file__).resolve().parents[3]
++            if str(_envharness_root) not in _sys.path:
++                _sys.path.insert(0, str(_envharness_root))
++            from envharness.rl.envharness_alfworld import (
++                build_envharness_alfworld_envs, envharness_alfworld_projection,
++            )
++            alf_config_path = os.path.join(os.path.dirname(__file__),
++                'env_package/alfworld/configs/config_tw.yaml')
++            env_kwargs = {
++                'eval_dataset': config.env.alfworld.eval_dataset,
++                # SkillOS-inspired: shrink TRAIN to a type-balanced subset.
++                # Set ALFWORLD_TRAIN_SUBSET_PATH env var to a JSONL with
++                # 'game_file' keys (see examples/build_alfworld_train_subset.py).
++                # When unset, full ~3553-task TRAIN is used. This same
++                # env_kwargs dict is handed to BOTH the train and val envs
++                # below, but EnvharnessAlfworldEnvs gates train_subset_path on
++                # is_train (see envs.py) so it is dropped for eval splits --
++                # the subset JSONL lists TRAIN game_files, which match zero
++                # eval games (the bridge would raise on a zero-match filter).
++                'train_subset_path': os.environ.get('ALFWORLD_TRAIN_SUBSET_PATH'),
++                # Optional: per-game-file mutation corpus produced by
++                # examples/build_mutation_corpus.py. When set, train workers
++                # apply the matching MutationLayer per episode (Setting A:
++                # base-Qwen3-targeted; Setting B phase 2: step_30-targeted).
++                # Gated on is_train inside EnvharnessAlfworldEnvs so eval
++                # workers always use the vanilla env -- SR stays comparable
++                # to the unmutated step_60 baseline.
++                'mutation_corpus_path': os.environ.get('ENVHARNESS_MUTATION_CORPUS'),
++                # AUGMENT/COMBINE: when set, the train subset is authoritative
++                # so mutated game COPIES outside alfworld's scanned dir load.
++                # Gated on is_train inside EnvharnessAlfworldEnvs.
++                'subset_authoritative': os.environ.get(
++                    'ENVHARNESS_SUBSET_AUTHORITATIVE', '').lower()
++                    in ('1', 'true', 'yes'),
++            }
++            _envs = build_envharness_alfworld_envs(
++                alf_config_path, config.env.seed,
++                config.data.train_batch_size, group_n,
++                is_train=True, env_kwargs=env_kwargs,
++                resources_per_worker=resources_per_worker)
++            _val_envs = build_envharness_alfworld_envs(
++                alf_config_path, config.env.seed + 1000,
++                config.data.val_batch_size, 1,
++                is_train=False, env_kwargs=env_kwargs,
++                resources_per_worker=resources_per_worker)
++            projection_f = partial(envharness_alfworld_projection)
++            envs = AlfWorldEnvironmentManager(_envs, projection_f, config)
++            val_envs = AlfWorldEnvironmentManager(_val_envs, projection_f, config)
++            return envs, val_envs
++
+         from agent_system.environments.env_package.alfworld import build_alfworld_envs, alfworld_projection
+         if config.env.env_name == 'alfworld/AlfredThorEnv':
+             alf_config_path = os.path.join(os.path.dirname(__file__), 'env_package/alfworld/configs/config_tw.yaml')
+@@ -641,7 +747,7 @@ def make_envs(config):
+         }
+         _envs = build_alfworld_envs(alf_config_path, config.env.seed, config.data.train_batch_size, group_n, is_train=True, env_kwargs=env_kwargs, resources_per_worker=resources_per_worker)
+         _val_envs = build_alfworld_envs(alf_config_path, config.env.seed + 1000, config.data.val_batch_size, 1, is_train=False, env_kwargs=env_kwargs, resources_per_worker=resources_per_worker)
+-        
++
+         projection_f = partial(alfworld_projection)
+         envs = AlfWorldEnvironmentManager(_envs, projection_f, config)
+         val_envs = AlfWorldEnvironmentManager(_val_envs, projection_f, config)
+@@ -661,6 +767,60 @@ def make_envs(config):
+         envs = SokobanEnvironmentManager(_envs, projection_f, config)
+         val_envs = SokobanEnvironmentManager(_val_envs, projection_f, config)
+         return envs, val_envs
++    elif config.env.env_name.lower().startswith("envharness/webshop") or \
++            "envharness_webshop" in config.env.env_name.lower():
++        # EnvHarness <-> verl-agent WebShop integration. Drives WebShop through
++        # envharness.bridges.webshop.WebshopBridge (one WebAgentTextEnv per Ray
++        # worker) with an optional per-session MutationLayer. Reuses the native
++        # WebshopEnvironmentManager (obs formatting / success) and the native
++        # webshop_projection (raw "search[...]"/"click[...]" parsing).
++        import sys as _sys
++        from pathlib import Path as _Path
++        # repo root = .../EnvHarness (envharness/ lives here). __file__ is
++        # .../EnvHarness/third_party/verl-agent/agent_system/environments/
++        # env_manager.py, so parents[4] is the repo root. (Ray workers also
++        # need it -- the launcher exports PYTHONPATH; this is the in-driver
++        # belt-and-suspenders.)
++        _envharness_root = _Path(__file__).resolve().parents[4]
++        if str(_envharness_root) not in _sys.path:
++            _sys.path.insert(0, str(_envharness_root))
++        from envharness.rl.envharness_webshop import build_envharness_webshop_envs
++        from agent_system.environments.env_package.webshop import webshop_projection
++        _wroot = os.path.join(os.path.dirname(__file__),
++                              'env_package/webshop/webshop')
++        if config.env.webshop.use_small:
++            file_path = os.path.join(_wroot, 'data/items_shuffle_1000.json')
++            attr_path = os.path.join(_wroot, 'data/items_ins_v2_1000.json')
++        else:
++            file_path = os.path.join(_wroot, 'data/items_shuffle.json')
++            attr_path = os.path.join(_wroot, 'data/items_ins_v2.json')
++        env_kwargs = {
++            'observation_mode': 'text',
++            'num_products': None,
++            'human_goals': config.env.webshop.human_goals,
++            'file_path': file_path,
++            'attr_path': attr_path,
++        }
++        # TRAIN-ONLY per-session mutation corpus (eval runs vanilla so SR stays
++        # comparable). Set ENVHARNESS_WEBSHOP_MUTATION_CORPUS to a JSONL of
++        # {"session", "mutation_code", "in_env_actions"} records.
++        _mut = os.environ.get('ENVHARNESS_WEBSHOP_MUTATION_CORPUS')
++        _envs = build_envharness_webshop_envs(
++            seed=config.env.seed, env_num=config.data.train_batch_size,
++            group_n=group_n, is_train=True, env_kwargs=env_kwargs,
++            webshop_root=_wroot, mutation_corpus_path=_mut,
++            resources_per_worker=resources_per_worker)
++        _val_envs = build_envharness_webshop_envs(
++            seed=config.env.seed + 1000, env_num=config.data.val_batch_size,
++            group_n=1, is_train=False, env_kwargs=env_kwargs,
++            webshop_root=_wroot, mutation_corpus_path=None,
++            resources_per_worker=resources_per_worker)
++        projection_f = partial(webshop_projection)
++        envs = WebshopEnvironmentManager(_envs, projection_f, config)
++        val_envs = WebshopEnvironmentManager(_val_envs, projection_f, config)
++        import time
++        time.sleep((config.data.train_batch_size * group_n + config.data.val_batch_size) * 0.1)
++        return envs, val_envs
+     elif "webshop" in config.env.env_name.lower():
+         from agent_system.environments.env_package.webshop import build_webshop_envs, webshop_projection
+         if config.env.webshop.use_small:
+@@ -689,11 +849,25 @@ def make_envs(config):
+         from agent_system.environments.env_package.appworld import build_appworld_envs, appworld_projection
+         _envs = build_appworld_envs(dataset_name='train', seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, start_server_id=0, resources_per_worker=resources_per_worker)
+         _val_envs = build_appworld_envs(dataset_name='test_normal', seed=config.env.seed + 1000, env_num=config.data.val_batch_size, group_n=1, start_server_id=config.data.train_batch_size*group_n, resources_per_worker=resources_per_worker)
+-        
++
+         projection_f = partial(appworld_projection)
+         envs = AppWorldEnvironmentManager(_envs, projection_f, config)
+         val_envs = AppWorldEnvironmentManager(_val_envs, projection_f, config)
+         return envs, val_envs
++    elif "envharness_swegym_openhands" in config.env.env_name.lower():
++        # OpenHands in-context FC variant: same SWE-Gym Bridge + Ray workers,
++        # but the rollout policy acts in `<function=...>` format (for the
++        # NovaSky SWE-Gym-OpenHands / SkyRL checkpoints). MUST be checked
++        # before the plain `envharness_swegym` branch (substring match).
++        from envharness.rl.env_manager import make_envharness_swegym_openhands_envs
++        return make_envharness_swegym_openhands_envs(config)
++    elif "envharness_swegym" in config.env.env_name.lower():
++        # EnvHarness <-> verl-agent integration. Drives SWE-Gym instances
++        # through envharness.bridges.swebench.SWEBenchBridge (Docker per
++        # task) with an optional MutationLayer per env slot. See
++        # envharness/rl/env_manager.py for the Manager class.
++        from envharness.rl.env_manager import make_envharness_swegym_envs
++        return make_envharness_swegym_envs(config)
+     else:
+         print("Environment not supported")
+         exit(1)
+\ No newline at end of file

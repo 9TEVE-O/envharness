@@ -1,0 +1,72 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# EnvHarness experiment: toy24 + DifficultyZone, Anthropic Mutator + OpenAI Policy.
+#
+# Mirrors the structure of original.yaml; only the mutator (LLM instead of
+# noop) and the LLM backends differ.
+#
+# Setup:
+#   export ANTHROPIC_API_KEY='...'
+#   export OPENAI_API_KEY='...'
+#   python scripts/run_harness.py --config experiments/toy24/mutated.yaml \
+#       --run-name toy24-mutated
+#
+# For an offline plumbing test (no API keys):
+#   python scripts/run_harness.py --scripted --run-name smoke
+
+bridge:
+  import_path: envharness.bridges.toy24:Toy24Env
+  reset_options: {}
+  reset_seed: null
+
+mutator:
+  client_factory: envharness.infra.llm:LiteLLMClient
+  client_kwargs:
+    model: openai/gpt-4.1-mini
+
+policy:
+  client_factory: envharness.infra.llm:LiteLLMClient
+  client_kwargs:
+    model: openai/gpt-4.1-mini
+  action_format: function_calling
+
+objective:
+  type: difficulty_zone
+  target_band: [0.3, 0.7]
+  window: 30
+
+budget:
+  type: capped_adaptive
+  max_k: 3
+
+orchestrator:
+  task_id: toy24-mixed
+  task_description: "Combine the four numbers using +, -, *, / to make 24."
+  n_iterations: 5
+  max_episode_steps: 12
+  k_per_candidate: 3
+  base_seed: 42
+
+runner:
+  type: subprocess
+  timeout_seconds: 120
+
+storage:
+  trace_path: ./runs/{run_name}/traces.jsonl
+
+logging:
+  log_dir: ./runs/{run_name}
+  log_policy_calls: true
+  log_mutator_calls: true

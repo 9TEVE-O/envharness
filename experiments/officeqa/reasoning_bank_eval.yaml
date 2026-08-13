@@ -1,0 +1,56 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Stage 4: OfficeQA + ReasoningBank eval config.
+#
+# Three test-time conditions (nobank / orig / ours) on the held-out TEST split
+# (172 tasks). Bank paths are normally supplied via
+# `reasoning_bank_eval.py --bank-overrides orig=...,ours=...`.
+#
+# NOTE: OfficeQA uses SEPARATE splits. Eval seeds index the TEST split directly
+# (0..171) via reset_options.split=test -- there is NO 100-offset like the
+# spreadsheet held-out range.
+
+model:
+  name: openai/gpt-4.1-mini
+  temperature: 0.3
+  reasoning_effort: low
+  max_response_tokens: 65535    # 3.5-flash reasons verbosely; a low cap truncates turns
+                                # mid-thought (no tool call -> answer never saved -> false fail)
+
+policy:
+  max_steps: 30                 # grep/read/glob/answer turns per task
+
+retrieval:
+  top_k: 3                      # skills injected into the system prompt
+
+eval:
+  start_idx: 0                  # test split is a separate file; index from 0
+  n: 172                        # test split size
+  concurrency: 8
+
+env:
+  import_path: envharness.bridges.officeqa.bridge:OfficeQAEnv
+  reset_options:
+    data_path: experiments/officeqa/data
+    # docs_root: set here, or export OFFICEQA_DOCS_DIR (dir of parsed .txt docs)
+    split: test
+
+conditions:
+  nobank:
+    bank: null
+  orig:
+    bank: null                  # override: reasoning_bank_eval.py --bank-overrides orig=<path>
+  ours:
+    bank: null                  # override: reasoning_bank_eval.py --bank-overrides ours=<path>

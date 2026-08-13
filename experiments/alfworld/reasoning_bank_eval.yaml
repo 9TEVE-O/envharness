@@ -1,0 +1,67 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ALFWorld + ReasoningBank eval.
+#
+# Three test-time conditions (nobank / orig / ours) × two splits × N seeds.
+#
+# Run via:
+#   <your-env>/bin/python experiments/alfworld/reasoning_bank_eval.py \
+#       --config experiments/alfworld/reasoning_bank_eval.yaml \
+#       --out-dir runs/_reasoning_bank_eval_run1
+# (Add --n-indist / --n-ood / --start-seed / --concurrency to override.)
+#
+# Three rounds: run with --start-seed 0, 1000, 2000.
+
+model:
+  name: openai/gpt-4.1-mini
+  temperature: 0.4
+  max_response_tokens: 2048
+
+policy:
+  max_steps: 50
+  history_length: 4
+  prompt_style: skillos          # SkillOS template
+  inject_style: soft             # RB-canonical header + per-step discuss gate
+
+retrieval:
+  top_k: 5
+  mode: mmr                      # MMR = diversity-aware retrieval; on full banks
+                                 # (multiple items per task) it avoids the
+                                 # near-duplicate retrievals naive cosine is
+                                 # prone to. Set to "cosine" for plain top-k.
+  mmr_lambda: 0.5                # λ·sim − (1−λ)·redundancy; 0.5 = balanced
+  query_field: task              # use first "Task:" line of initial obs as query
+
+eval:
+  splits:                        # full eval set; override via CLI for smokes
+    eval_in_distribution: 140
+    eval_out_of_distribution: 134
+  start_seed: 0                  # 0 / 1000 / 2000 = round 1 / 2 / 3
+  concurrency: 6
+
+env:
+  import_path: envharness.bridges.alfworld:AlfworldEnv
+  reset_options:
+    repetition_threshold: 0      # pure-eval default; no Bridge-side truncation
+
+conditions:
+  nobank:
+    bank: null
+  orig:
+    # Override via `experiments/alfworld/reasoning_bank_eval.py --bank-overrides orig=<path>`.
+    bank: null
+  ours:
+    # Override via `experiments/alfworld/reasoning_bank_eval.py --bank-overrides ours=<path>`.
+    bank: null

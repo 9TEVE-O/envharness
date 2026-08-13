@@ -1,0 +1,142 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ALFWorld corpus -- reduced-scale variant of corpus.yaml.
+# Stage 1: fail-targeted `ours` corpus generation.
+#
+# Drives the Orchestrator:
+#   - HarnessAgent (LLM) with the ours fail-targeted system constraint
+#   - Rules harness for any A/T/O perturbations
+#   - Setup harness for in_env_actions S0 perturbations
+#   - AlfworldEnv as the base ActionableEnv
+#
+# Output (per task): K=5 BASELINE rollouts (the orig pool) + the ACCEPTED
+# Rules+Setup trajectories (the ours pool). Both go into the same
+# traces.jsonl, distinguished by kind="baseline" vs kind="accepted".
+
+env:
+  import_path: envharness.bridges.alfworld:AlfworldEnv
+  reset_options:
+    split: train
+    repetition_threshold: 0
+
+agent:
+  type: llm
+  client_factory: envharness.infra.llm:LiteLLMClient
+  client_kwargs:
+    model: openai/gpt-4.1-mini
+  extra_instructions: |
+    PHASE 1 -- TASK SELECTION (you may skip easy tasks):
+      Read HarnessAgentContext.baseline.sr (the K unmutated rollouts on
+      this task before your propose).
+        - If baseline_sr >= 0.8: SKIP. The Policy already solves this
+          task; no new skill to extract. Emit
+          `Candidate(rules_code="", in_env_actions=[],
+                     rationale="skip-easy-task")` and the orchestrator
+          will move on.
+        - If 0.0 < baseline_sr < 0.6: TARGET. The Policy struggles here.
+          Proceed to Phase 2.
+        - If baseline_sr == 0.0: TARGET if you can diagnose a recoverable
+          failure mode from the baseline trajectories. Otherwise SKIP.
+
+    PHASE 2 -- FAILURE DIAGNOSIS:
+      Read the baseline trajectories in HarnessAgentContext.baseline_traces.
+      Identify the specific failure mode (e.g. "Policy doesn't reason
+      about which container is most likely to hold the target", "Policy
+      gets stuck in navigation loops", "Policy forgets to OPEN closed
+      containers before searching"). State it explicitly in your
+      `rationale` field.
+
+    PHASE 3 -- IN-DISTRIBUTION HARNESS:
+      Build a harness that EXERCISES the failure-recovery skill without
+      changing the env's surface presentation. The Policy must NEVER see
+      anything in the mutated env that couldn't appear in standard
+      ALFWorld:
+
+      FORBIDDEN (introduces env-distribution shift):
+        - Hide admissible commands (no aggressive O-axis stripping)
+        - Block standard verbs with custom error messages
+        - Add new error / affordance text the standard env wouldn't print
+        - Remove "Admissible commands: ..." footer
+        - Invent action vocabulary
+        - Change observation FORMAT (whitespace, prefixes, casing)
+
+      PERMITTED (stays in-distribution):
+        - T-axis Rules: occasional standard-feedback failures
+          ("Nothing happens" returned as the obs text); only this exact
+          string, only at sub-10% frequency, no other surface change
+        - in_env_actions (Setup harness): execute a sequence of standard
+          `do(text=...)` actions before Policy starts (open containers,
+          move objects -- anything reachable via the normal tool set)
+
+    PHASE 4 -- ACCEPTANCE:
+      Run K=5 rollouts. The harness succeeds if mutated SR > baseline_sr
+      by at least 0.2 (the recovery skill helps). If only some rollouts
+      use the diagnosed recovery skill, ACCEPT but flag in rationale.
+      If neither, REFINE with a different failure mode or smaller
+      perturbation.
+
+policy:
+  client_factory: envharness.infra.llm:LiteLLMClient
+  client_kwargs:
+    model: openai/gpt-4.1-mini
+  action_format: think_action
+  max_history: 200
+  temperature: 0.5
+  task_description: |
+    You are an agent in a text-based household environment (ALFWorld).
+    Each turn you receive an observation and a list of admissible
+    commands. First reason step-by-step about the current situation
+    inside <think>...</think> tags. Then pick ONE admissible command
+    and output it inside <action>...</action> tags.
+
+objective:
+  type: difficulty_zone
+  target_band: [0.0, 1.0]            # no-op band; the agent's extra_instructions are the real acceptance criterion
+  window: 20
+
+budget:
+  type: capped_adaptive
+  max_k: 1
+
+orchestrator:
+  task_id: alfworld-corpus-ours-release
+  task_description: |
+    Mutate train tasks where the Policy is currently weak; only emit
+    harnesses that exercise failure-recovery skills WITHOUT shifting
+    the env's surface presentation.
+  n_iterations: 100                  # OVERRIDDEN via CLI --n-tasks
+  max_episode_steps: 50
+  k_per_candidate: 5
+  rollout_concurrency: 5
+  base_seed: 0
+  baseline_cache_dir: null   # safety: avoid empty orig bank from cache hits
+  task_id_stride: 1
+  task_id_base_offset: 0             # OVERRIDDEN via CLI --task-offset
+  discard_rollout_steps_after_decide: false
+  mutator_baseline_mode: full        # surface full baseline trajectories to the agent for diagnosis
+  skip_passthrough_candidates: true  # honor the prompt's "emit an empty Candidate to skip easy tasks":
+                                     # without this the K pass-through rollouts still run per skipped task
+
+runner:
+  type: subprocess
+  timeout_seconds: 500
+
+storage:
+  trace_path: ./runs/{run_name}/traces.jsonl
+
+logging:
+  log_dir: ./runs/{run_name}
+  log_policy_calls: true
+  log_agent_calls: true

@@ -1,0 +1,254 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# OfficeQA corpus -- reduced-scale variant of corpus.yaml.
+
+env:
+  import_path: envharness.bridges.officeqa.bridge:OfficeQAEnv
+  reset_options:
+    data_path: experiments/officeqa/data
+    # docs_root: set here, or export OFFICEQA_DOCS_DIR (dir of parsed .txt docs)
+    split: train
+
+agent:
+  type: llm
+  client_factory: envharness.infra.llm:LiteLLMClient
+  client_kwargs:
+    model: openai/gpt-4.1-mini
+  extra_instructions: |
+    DOMAIN: OfficeQA. The Policy answers a factual question whose evidence lives
+    in one or more parsed U.S. Treasury Bulletin documents (dense financial
+    tables rendered to text). It navigates with grep(pattern, path) /
+    read(path, start, limit) / glob(pattern) over a READ-ONLY docs root, then
+    calls answer(text). SUCCESS is a normalized exact-match of the Policy's
+    answer against a hidden gold value; this comparison is independent of what
+    the Policy sees. OfficeQA has no world state -- every tool call is a
+    stateless read -- so your usable hooks are filter_observation (O),
+    filter_action (A), modify_transition (T), and step_reward (R). in_env_actions
+    (Setup) have no persistent effect here; do not rely on them.
+
+    Your job is a DISCOVER-then-TEACH pipeline. From the Policy's baseline
+    behaviour on this task, DISCOVER the specific skill it is MISSING -- the
+    capability whose absence caused a failure, or that a fragile success skated
+    past. Then build a LEARNING ENVIRONMENT (via Rules) in which the Policy can
+    SUCCEED BY EXERCISING that skill -- so its successful trajectories there
+    demonstrate it. Move toward the productive band from whichever side the
+    baseline sits on:
+      * If the Policy FAILS the task (cannot currently succeed -- e.g. baseline
+        SR ~0), make the env EASIER so a skill-using success becomes REACHABLE
+        (raise SR up into the band). A struggling Policy must be brought within
+        reach before it can demonstrate anything.
+      * If the Policy succeeds TRIVIALLY via a shortcut, make success require the
+        skill (bring SR down into the band).
+    HOW you reshape the env is entirely YOUR design decision -- work it out from
+    the task and your diagnosis, within the Phase 3 constraints. You are not
+    solving the task for the Policy and you never leak the gold answer; you are
+    building an env it can LEARN the skill FROM by succeeding at it. Those
+    successful trajectories become the training signal -- a skill the unmutated
+    (orig) env never elicited. That transferable edge is exactly what we want
+    `ours` to have over `orig`.
+
+    PHASE 1 -- TASK SELECTION (the band is a DESTINATION, not an entry filter):
+      Do NOT skip a task because its baseline SR is high or low. The target band
+      (roughly SR in [0.3, 0.7]) is where the task should END UP after you solve
+      its problem -- solvable enough that the recovery skill produces successes
+      we can harvest as `ours` training data -- NOT a precondition for selecting
+      it. The natural targets are tasks whose baseline reveals a problem to
+      solve: the Policy fails, or it succeeds only fragilely. A baseline SR of 0
+      is a PRIME target, NOT a skip -- it just means you must SCAFFOLD the task
+      EASIER (raise SR up) rather than restrict it. Read
+      HarnessAgentContext.baseline.sr and baseline_traces to find that problem;
+      emit an empty skip Candidate ONLY when the traces show the Policy already
+      solves the task robustly (no failure mode, no fragility) -- then there is
+      nothing to teach.
+
+    PHASE 2 -- FAILURE / FRAGILITY DIAGNOSIS:
+      Read the baseline trajectories in HarnessAgentContext.baseline_traces (the
+      Policy's actual grep/read calls, tool outputs, and final answer). Identify
+      the SPECIFIC failure mode or fragile shortcut that decided the outcome, and
+      state it in `rationale`. Diagnose from the evidence -- do not guess. The
+      recovery skill you name is what the mutation must force the successful
+      trajectories to exercise.
+
+    PHASE 3 -- IN-DISTRIBUTION LEARNING HARNESS (keep it solvable + grading valid):
+      Build Rules so that the Policy succeeds by EXERCISING the missing skill (it
+      learns by doing), while keeping the task SOLVABLE for THIS Policy (a
+      struggling Policy needs the task brought within reach) and the grading
+      FAIR. DIRECTION follows the baseline: if the Policy is FAILING, make the
+      env easier so a skill-using success becomes reachable; if it succeeds
+      TRIVIALLY via a shortcut, make success require the skill. WHICH hooks you
+      use and exactly how you reshape the channel is your own design decision --
+      choose the mechanism yourself; the constraints below bound it.
+      GRADING INTEGRITY (hard constraint): never alter, hide, or hint the gold
+      answer; never fabricate or corrupt the factual figures the correct answer
+      depends on; the evidence for the true answer must stay reachable through
+      the tools. The Policy can still grep/read/glob and answer.
+      STAY IN-DISTRIBUTION: do not invent tool output the standard env could not
+      produce, do not block the answer tool, do not change the observation FORMAT
+      gratuitously. Reshape the CHANNEL (what/how much is surfaced, which actions
+      are admissible, occasional realistic tool behaviour, a dense per-step
+      signal), not the underlying document truth. Keep perturbations MILD and
+      REALISTIC -- the mutated env must stay close to the standard one.
+      TRANSFERABILITY (critical -- this is what makes ours beat orig): the skill a
+      successful trajectory learns must ALSO help solve the task in the STANDARD,
+      UNMUTATED env. If a success only learns how to COPE WITH YOUR MUTATION (e.g.
+      "work around redacted output", "handle the noise you injected", "recover
+      from the tool failures you added"), that skill is OOD -- it will NOT transfer
+      to the clean test env and the mutation has FAILED. Favour perturbations that
+      nudge the Policy toward a technique that is GOOD PRACTICE in the normal env
+      too (verify a value in its column/header context, cross-check a second
+      document, choose a distinctive search term) -- NOT artificial obstacles that
+      force coping behaviours. Ask yourself: "would a trajectory that succeeds here
+      teach a habit that also wins on the UNMUTATED task?" If no, redesign.
+
+    HARD FORBIDDEN -- surface-corruption mutations (mechanical red line, NOT a
+    judgment call). Mutations that CORRUPT THE OBSERVATION SURFACE produce
+    anti-transferable skills: a success under them only learns to cope with a
+    distortion that does not exist at test time. A candidate is INVALID: do
+    NOT propose it, and REJECT it in decide() NO MATTER WHAT SR IT PRODUCES, if
+    its Rules do ANY of the following to the bytes the Policy reads via
+    grep/read/glob:
+      - Redact, mask, blank, scramble, replace with X's, or otherwise alter
+        filenames, paths, numbers, dates, headers, or ANY characters in tool
+        output.
+      - ADD text to the observation that the true document does not contain:
+        guidance, hints, reminders, "[Guidance: ...]" blocks, "verify/ensure/
+        check each value" instructions, step-by-step pointers, task-specific
+        callouts (e.g. naming the exact years/rows/columns the answer needs), or
+        ANY coaching. Injecting help is a HINT LEAK -- it does not exist at test
+        time and is exactly as non-transferable as redaction (and can leak the
+        approach or the answer). filter_observation must return the document
+        bytes UNCHANGED; it is NOT a channel for coaching the Policy.
+      - Truncate or cap read()/grep() output below what the standard env returns
+        (e.g. a 30-line read cap, a max-matches cap) so evidence is withheld.
+      - Constrain WHICH grep PATTERN the Policy may use (e.g. "patterns must be
+        >= 4 chars", banning short terms); the standard env accepts any pattern.
+      - Inject synthetic tool output, a fake "no match", or noise that a real
+        grep/read/glob over the true document could not produce.
+      - Rename, hide, or re-key documents so the given source_document path
+        resolves differently than in the standard env.
+    Every one of these teaches the Policy to COPE WITH REDACTION THAT DOES NOT
+    EXIST AT TEST TIME. The invariant is
+    absolute: every character the Policy reads must be BYTE-IDENTICAL to what the
+    standard unmutated env would surface. Reshape the CHALLENGE, never the
+    SURFACE. If you cannot find a non-surface-corrupting way to reshape this
+    task, emit an empty skip Candidate -- a skip is STRICTLY BETTER than any
+    surface-corrupting mutation.
+
+    PHASE 4 -- ACCEPTANCE (in decide()):
+      MECHANICAL REJECT FIRST (before any SR reasoning): if the accepted Rules
+      remove, mask, replace, cap, ADD guidance/hints to, or otherwise change ANY
+      byte the Policy reads (see HARD FORBIDDEN above -- injected "[Guidance:...]"
+      / "verify each value" coaching counts as a surface violation just like
+      redaction), REJECT the candidate outright -- an in-band SR does NOT rescue
+      a surface-corrupting mutation. Only candidates that leave
+      every observation byte identical to the standard env are eligible for the
+      SR-based acceptance below.
+      Judge from the K mutated rollouts. ACCEPT if the learning env did its job:
+      the successful trajectories now exercise the missing skill you targeted,
+      the skill is TRANSFERABLE (it would also help on the standard unmutated env,
+      not just cope with your mutation -- REJECT if the only thing a success
+      learned is how to survive your perturbation),
+      AND there are harvestable successes (SR in a solvable, productive range --
+      roughly [0.3, 0.7]). The two directions accept differently:
+        * Scaffolded a failing task: ACCEPT once the scaffold produced successes
+          where the baseline had ~none (SR rose from ~0 up into the band) and
+          those successes exercise the skill. Getting a struggling Policy from 0
+          to even a few skill-using successes is the win -- do NOT reject it for
+          being "too easy now".
+        * Removed a shortcut: ACCEPT once success requires the skill and enough
+          successes remain (SR came down into the band, not crushed to ~0).
+      REFINE if the successes still bypass the skill (env didn't engage it), if a
+      scaffold still yields ~0 successes (not enough help -- scaffold harder), or
+      if a shortcut-removal crushed SR to ~0 (too aggressive -- scaffold back).
+      Do NOT accept a mutation that left no skill-using successes to harvest.
+
+policy:
+  client_factory: envharness.infra.llm:LiteLLMClient
+  client_kwargs:
+    model: openai/gpt-4.1-mini
+    reasoning_effort: low
+  action_format: function_calling
+  max_history: 60
+  temperature: 0.3
+  # Mirrors experiments/officeqa/prompts.py AGENT_SYSTEM (the no-bank policy
+  # prompt) so corpus policy == eval no-bank base prompt; the RB eval injects
+  # retrieved skills into this same prompt.
+  task_description: |
+    You are an expert research assistant answering factual questions about
+    U.S. Treasury Bulletin documents (dense financial tables parsed to text).
+
+    You are given a QUESTION and a source_document under docs_root. Find the
+    exact figure/fact the question asks for and return it.
+
+    Tools:
+    - grep(pattern, path): case-insensitive substring search; returns matching
+      lines with line numbers. Use it FIRST to locate the relevant row/heading
+      (try the metric name, a year, or a distinctive noun from the question).
+    - read(path, start, limit): read a line window around a match to see the
+      full table row and its column headers.
+    - glob(pattern): list candidate documents (rarely needed -- the
+      source_document is given).
+    - answer(text): submit the concise final answer and end the task.
+
+    Method:
+    1. grep for the key term(s) in the source_document.
+    2. read around the best match to align the value with its column/units.
+    3. The tables are wide; verify you are reading the right year/column before
+       answering.
+    4. answer() with ONLY the value (a number or short phrase). Match the
+       question's units but do not add words -- e.g. answer "507", not "507
+       million dollars".
+
+    Be efficient: a handful of grep/read calls should suffice. Do not answer
+    without locating the evidence in the document.
+
+objective:
+  type: difficulty_zone
+  target_band: [0.0, 1.0]            # no-op band; acceptance driven by the 4-phase prompt
+  window: 20
+
+budget:
+  type: capped_adaptive
+  max_k: 1
+
+orchestrator:
+  task_id: officeqa-corpus
+  task_description: |
+    Reshape OfficeQA train tasks where the Policy is weak, within the
+    grading-integrity boundary, to elicit transferable document-navigation
+    skills.
+  n_iterations: 50                   # train split has 50 tasks; OVERRIDE via --n-tasks
+  max_episode_steps: 30
+  k_per_candidate: 5
+  rollout_concurrency: 5
+  base_seed: 0
+  baseline_cache_dir: null           # avoid an empty orig pool from cache hits
+  task_id_stride: 1
+  task_id_base_offset: 0
+  discard_rollout_steps_after_decide: false
+  mutator_baseline_mode: full        # surface full baseline trajectories for diagnosis
+  skip_passthrough_candidates: true  # honor "emit empty Candidate to skip easy tasks"
+
+runner:
+  type: subprocess
+  timeout_seconds: 700
+
+storage:
+  trace_path: ./runs/{run_name}/traces.jsonl
+
+logging:
+  log_dir: ./runs/{run_name}
+  log_policy_calls: true
+  log_agent_calls: true

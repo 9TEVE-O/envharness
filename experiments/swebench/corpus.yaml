@@ -1,0 +1,226 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SWE-bench Lite corpus — FAIL-TARGETED mutator + think_action Policy.
+#
+# Config notes:
+#   - Policy uses action_format: think_action -- the model emits
+#     <think>...</think><action>cmd</action> per turn. The runner writes
+#     last_raw_response (full <think>+<action>) into Step.policy_raw_response;
+#     bank induction then renders the trajectory with thinking preserved, so
+#     lessons capture Policy reasoning, not just bash commands.
+#
+# Test-set: SWE-bench Verified minus Lite (407 held-out tasks).
+
+bridge:
+  # Bash-only subclass. The shipped SWEBenchBridge has tool_registry =
+  # [Bash, StrReplaceEditor]; think_action / text_complete require EXACTLY
+  # ONE tool (the policy single-arg dispatch path expects this).
+  import_path: experiments.swebench.bash_bridge:SWEBenchEnvBashOnly
+  reset_options:
+    subset: lite
+    step_timeout_seconds: 60
+    container_timeout_seconds: 7200
+    eval_timeout_seconds: 1800
+
+mutator:
+  type: llm
+  client_factory: envharness.infra.llm:LiteLLMClient
+  client_kwargs:
+    model: openai/gpt-4.1-mini
+    reasoning_effort: minimal   # suppress heavy thinking; much faster per turn
+  extra_instructions: |
+    Do NOT override modify_reward (the R axis). Success is determined by the
+    official SWE-bench harness verdict on the submitted patch (resolved/unresolved).
+
+    PHASE 1 -- TASK SELECTION (band-targeted, alfworld V4 style):
+      Goal: produce a mutation whose K=5 rollout SR lands in the target band
+      [0.4, 0.6]. Look at MutatorContext.baseline.success_rate:
+        - If baseline_sr in [0.4, 0.6]: SKIP. Already in band; nothing to do.
+          Emit Candidate(mutation_code="", rationale="skip-in-band").
+        - If baseline_sr > 0.6: TARGET. Task is too easy. Design a mutation
+          that introduces realistic friction so mutated_sr drops into the band.
+        - If baseline_sr < 0.4: TARGET. Task is too hard. Design a mutation
+          that makes mutated_sr land in [0.4, 0.6]. You decide which axis
+          and what perturbation. If you absolutely cannot raise mutated_sr
+          above 0.0 on a strictly impossible task, emit
+          Candidate(mutation_code="", rationale="skip-unsolvable").
+
+    PHASE 2 -- FAILURE DIAGNOSIS:
+      Read the baseline trajectories in MutatorContext.baseline.rollouts.
+      Identify the SPECIFIC failure mode and state it in your rationale. Examples
+      of SWE-bench failure modes worth diagnosing:
+        - "Policy patches the wrong function because it doesn't read the failing
+          test's imports/fixtures first"
+        - "Policy uses sed -i and corrupts indentation in a Python class body"
+        - "Policy doesn't run pytest after editing, submits an untested patch"
+        - "Policy gets stuck doing grep -rn variations instead of reading the
+          imported module directly"
+        - "Policy submits before realizing the patch broke PASS_TO_PASS tests"
+
+    PHASE 3 -- IN-DISTRIBUTION MUTATION:
+      Build a mutation that EXERCISES the failure-recovery skill without
+      changing the env's surface presentation. The Policy must NEVER see
+      anything in the mutated env that couldn't appear in a standard SWE-bench
+      run:
+
+      The invariant: every byte the Policy reads -- problem_statement,
+      observation text, command output -- must look like it came from a
+      standard SWE-bench run. If the Policy can detect that its env was
+      tampered with, the induced lesson will be about the tampering, not
+      about a bug-fix skill, and the bank will not transfer. Mutate the
+      CHALLENGE, not the SURFACE.
+
+      HARD FORBIDDEN -- mutations that violate the invariant. These
+      mutations CANNOT produce transferable skills and waste corpus
+      budget. Do NOT do any of these:
+        - Modify `env_state.problem_statement` in any way (append,
+          replace, insert). The issue text is fixed truth. "Helpful hints"
+          / "Additional context" / file path callouts in the problem
+          statement are the #1 source of non-transferable bank lessons.
+        - Pre-write, pre-modify, pre-delete, or pre-touch ANY file under
+          /testbed before the Policy starts. The starting filesystem is
+          part of the SWE-bench task contract.
+        - Pre-create "backup", "decoy", or "stale" files anywhere the
+          Policy will see them.
+        - Pre-run pytest / build / git operations whose output the Policy
+          sees in the first observation. The first obs must be only the
+          standard problem_statement.
+        - Inject synthetic error messages, fake tracebacks, or stdout
+          text that real docker exec / bash / pytest would not produce.
+        - Add ENVHARNESS-branded or otherwise-distinctive text the
+          Policy could pattern-match in its memory.
+
+      All 5 axes are available (R is reserved for the step_reward hook
+      per the PROCESS REWARD section; do NOT override modify_reward).
+      Decide for yourself which axis and what perturbation fits this
+      task's diagnosed failure mode WITHIN the forbidden list. State in
+      your rationale (a) which axis you chose, (b) why your mutation
+      preserves the invariant. If you can't find an in-distribution
+      mutation, SKIP with
+      `Candidate(mutation_code="", rationale="no-in-dist-knob")`.
+      Empty Candidate is always preferred over surface-violating
+      Candidate.
+
+    PHASE 4 -- ACCEPTANCE (band-targeted):
+      Run K=5 rollouts.
+        - ACCEPT if mutated_sr in [0.4, 0.6] (target band)
+        - REFINE if mutated_sr is outside but close (e.g. [0.2, 0.4) or
+          (0.6, 0.8]): adjust mutation magnitude and retry
+        - REJECT if mutated_sr is far outside (<= 0.2 or >= 0.8) and you
+          have exhausted refinement attempts: the mutation strategy is wrong
+      The point is to grow the in-band fraction so the resulting corpus
+      gives the downstream ReasoningBank (paired-diff atomic induction)
+      maximum recovery-skill signal.
+
+policy:
+  client_factory: envharness.infra.llm:LiteLLMClient
+  client_kwargs:
+    model: openai/gpt-4.1-mini
+    reasoning_effort: minimal   # suppress heavy thinking; much faster per turn
+  action_format: think_action
+  max_history: 200                       # long episodes truncate early turns
+                                          # but the system message stays
+  temperature: 0.5
+  task_description: |
+    You are an automated software-engineering agent operating inside a per-task
+    Docker container. The repository is checked out at /testbed.
+
+    You operate in a STRICT TURN-BASED loop:
+      - Each turn you see an observation (the most recent bash output).
+      - You reply with ONE <think>...</think> block containing your reasoning,
+        followed by ONE <action>...</action> block containing ONE bash command.
+      - The system runs that command, returns the output, then it is YOUR NEXT TURN.
+
+    CRITICAL FORMATTING RULES:
+      - Emit EXACTLY ONE <think>...</think> block per turn.
+      - Emit EXACTLY ONE <action>...</action> block per turn.
+      - STOP IMMEDIATELY after the closing </action> tag. Do NOT continue with
+        more text, more <think> blocks, more <action> blocks, or "plans" for
+        future turns. The framework only executes ONE action per turn; extra
+        actions you emit are IGNORED but WASTE TOKENS.
+      - Multi-line bash inside <action>...</action> IS supported (heredocs,
+        multi-line `python -c` scripts).
+
+    Example of a CORRECT turn:
+      <think>The traceback mentions `astropy/io/ascii/rst.py`. I'll start by
+      reading the class definition.</think>
+      <action>sed -n '1,80p' /testbed/astropy/io/ascii/rst.py</action>
+
+    Example of an INCORRECT turn (DO NOT do this):
+      <think>I should explore, then patch, then submit.</think>
+      <action>ls /testbed</action>
+      <action>cat /testbed/file.py</action>
+      <action>echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git -C /testbed diff</action>
+    (Three actions in one turn; framework only runs the FIRST, others are wasted.)
+
+    Workflow over multiple turns:
+      1. Turn 1+: read the issue (provided in obs), explore /testbed with grep/sed/cat.
+      2. Turn N: edit file(s) -- `sed -i`, a python -c heredoc, or a multi-line
+         heredoc inside <action>...</action>.
+      3. Turn N+1: run the relevant tests with `pytest` to verify your fix.
+      4. Final turn: submit with a single action:
+           <action>echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git -C /testbed diff</action>
+
+objective:
+  # Band-targeted: Mutator's goal is to land mutated_sr in [0.4, 0.6].
+  type: difficulty_zone
+  target_band: [0.4, 0.6]
+  window: 20
+
+budget:
+  type: capped_adaptive
+  max_k: 5
+
+orchestrator:
+  task_id: swebench-lite-corpus-v4-think
+  task_description: |
+    Mutate SWE-bench Lite tasks where the Policy is currently weak; only emit
+    mutations that exercise failure-recovery skills WITHOUT shifting the env's
+    surface presentation. The induced memory items should capture transferable
+    bug-fix techniques that close the gap on held-out (Verified) tasks.
+  n_iterations: 100                       # reproduce.py defaults to 100 Lite
+
+  max_episode_steps: 250
+  k_per_candidate: 5
+  rollout_concurrency: 2
+  base_seed: 0
+  task_id_outer_stride: 1
+  task_id_base_offset: 0
+  discard_rollout_steps_after_decide: false   # keep step data for induction
+  skip_passthrough_candidates: true   # fail-targeting: skip in-band tasks
+  compute_baseline: true
+  # MUST be null: a shared baseline cache makes most tasks HIT the cache and
+  # skip emitting baseline trajectories (orchestrator ~L784). The orig bank is
+  # induced from baseline traces, and the ours (cascade) bank REQUIRES a
+  # base_fail (failed baseline) per task to pair with -- so a cache hit drops
+  # the whole task from BOTH banks (shrinking both banks drastically). null
+  # forces a fresh K=5 baseline roll per task that emits kind=baseline traces.
+  baseline_cache_dir: null
+  # Give the Mutator the full baseline trajectories (think + action + obs)
+  # for one success and one failure rollout ("summary" would only pass
+  # aggregate stats).
+  mutator_baseline_mode: full
+
+runner:
+  type: subprocess
+  timeout_seconds: 2400
+
+storage:
+  trace_path: ./runs/{run_name}/traces.jsonl
+
+logging:
+  log_dir: ./runs/{run_name}
+  log_policy_calls: true
+  log_mutator_calls: true

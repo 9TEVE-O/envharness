@@ -1,0 +1,187 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SpreadsheetBench corpus -- reduced-scale variant of corpus.yaml.
+
+env:
+  import_path: envharness.bridges.spreadsheetbench.bridge:SpreadsheetBenchEnv
+  reset_options:
+    data_path: experiments/spreadsheetbench/data/spreadsheetbench_verified_400
+    step_timeout: 60
+    obs_truncate: 6000
+    preview_rows: 20
+
+agent:
+  type: llm
+  client_factory: envharness.infra.llm:LiteLLMClient
+  client_kwargs:
+    model: openai/gpt-4.1-mini
+  extra_instructions: |
+    DOMAIN: SpreadsheetBench. The Policy edits a spreadsheet with run_python(code)
+    and declares done with submit(). SUCCESS is graded by comparing the Policy's
+    saved output_path to a hidden golden file, ONLY at the cells named by
+    answer_position; this comparison is independent of what the Policy sees.
+
+    Your job: take a task the Policy solves EASILY (via a shortcut or a fragile
+    assumption) and make it a bit harder so that solving it now REQUIRES a robust,
+    transferable skill the Policy wasn't otherwise exercising. The successful
+    mutated trajectories then teach that skill -- a skill the unmutated (orig)
+    env never forced, which is exactly the edge we want ours to have over orig.
+
+    PHASE 1 -- TASK SELECTION:
+      Read HarnessAgentContext.baseline.sr (K unmutated rollouts on this task).
+        - baseline_sr >= 0.6: TARGET (this is the main case). The Policy solves it
+          easily; find the shortcut it leans on and remove it. Proceed to Phase 2.
+        - 0.0 < baseline_sr < 0.6: also TARGET -- diagnose what trips it up.
+        - baseline_sr == 0.0: SKIP unless you can diagnose a clearly recoverable
+          issue; emit Candidate(rules_code="", in_env_actions=[], rationale="skip").
+
+    PHASE 2 -- SHORTCUT / FRAGILITY DIAGNOSIS:
+      Read the baseline trajectories in HarnessAgentContext.baseline_traces (full
+      think + run_python code + output). On an EASY task, identify the SHORTCUT or
+      fragile assumption the easy success relies on, e.g. "reads the answer straight
+      off the spreadsheet_content preview instead of computing it", "assumes the
+      data has no blank/duplicate rows", "hardcodes a column position instead of
+      finding it by header", "relies on pandas' forgiving parsing", "doesn't verify
+      the saved answer_position before submit", "assumes formulas are pre-computed".
+      State the shortcut AND the robust skill that removing it forces, in `rationale`.
+
+    PHASE 3 -- SHORTCUT-REMOVING HARNESS (stay in-distribution + keep grading valid):
+      Build a harness that removes that shortcut so the Policy must use the robust
+      skill, while keeping the task SOLVABLE and the grading fair.
+      GRADING INTEGRITY (hard constraint): the correct answer at answer_position is
+      UNCHANGED (never alter output_path / answer_position or the data that
+      determines the graded cells); the Policy can still read, run code, save, submit.
+      FORBIDDEN: invent obs text the standard env wouldn't print; block run_python or
+      submit entirely; alter the graded data / answer_position / output_path.
+      PERMITTED (removes a shortcut, forces the robust skill):
+        - O-axis (filter_observation): trim the spreadsheet_content preview so the
+          Policy must inspect the file programmatically instead of reading answers off it.
+        - A-axis (filter_action / modify_transition): block a library/approach the
+          baseline over-relied on (e.g. pandas) so it must use robust openpyxl.
+        - in_env_actions (Setup): inject a realistic anomaly OUTSIDE answer_position
+          (blank/duplicate rows, mixed types, unsorted data) that the robust skill
+          must handle but the shortcut ignores -- golden stays valid.
+        - T-axis Rules: occasional realistic transient run_python behaviour, sub-10%.
+      Keep perturbations MILD and REALISTIC -- the mutated env must stay close to
+      the standard one.
+      TRANSFERABILITY (critical -- this is what makes ours beat orig): the skill a
+      successful trajectory learns must ALSO help solve the task in the STANDARD,
+      UNMUTATED env. If a success only learns how to COPE WITH YOUR MUTATION (e.g.
+      "work around the trimmed spreadsheet_content preview", "handle the blocked
+      pandas library", "recover from the transient run_python errors you injected"),
+      that skill is OOD -- it will NOT transfer to the clean test env and the
+      mutation has FAILED. Favour perturbations that nudge the Policy toward a
+      technique that is GOOD PRACTICE in the normal env too (locate a column by its
+      header instead of a fixed letter, reopen and read back answer_position before
+      submit, save to the exact output_path) -- NOT artificial obstacles that force
+      coping behaviours. Ask yourself: "would a trajectory that succeeds here teach
+      a habit that also wins on the UNMUTATED task?" If no, redesign.
+
+    PHASE 4 -- ACCEPTANCE (in decide()):
+      Judge from the K mutated rollouts. ACCEPT if the mutation made the task
+      genuinely harder-but-solvable (mutated SR dropped below baseline but stays
+      > ~0.2, i.e. the Policy can still succeed) AND the successful trajectories
+      now USE the robust skill the diagnosis targeted (not the removed shortcut),
+      AND that skill is TRANSFERABLE (it would also help on the standard unmutated
+      env, not just cope with your mutation -- REJECT if the only thing a success
+      learned is how to survive your perturbation).
+      If the mutation left SR unchanged (shortcut not actually removed) or crushed
+      SR to ~0 (too hard/unsolvable), REFINE with a different shortcut or a smaller
+      perturbation. Do NOT accept a mutation that neither removed a shortcut nor
+      exercised a new skill.
+
+policy:
+  client_factory: envharness.infra.llm:LiteLLMClient
+  client_kwargs:
+    model: openai/gpt-4.1-mini
+    reasoning_effort: low
+  action_format: function_calling
+  max_history: 40
+  temperature: 0.5
+  # Mirrors experiments/spreadsheetbench/prompts.py AGENT_SYSTEM (the
+  # no-bank policy prompt). reasoning_bank_eval.py imports that symbol directly; this copy
+  # keeps run_harness.py bridge-agnostic (no import indirection in configs).
+  task_description: |
+    You are a spreadsheet expert who manipulates spreadsheets through Python code.
+
+    You are given a spreadsheet manipulation task. The observation contains:
+    - working_directory: absolute path to your sandbox; create temp files only here.
+    - instruction: the manipulation request.
+    - spreadsheet_path (input): absolute path of the input spreadsheet to read.
+    - output_path: the EXACT absolute path where you MUST save your final answer.
+    - instruction_type: 'Cell-Level Manipulation' or 'Sheet-Level Manipulation'.
+    - answer_position: the cells that will be graded (e.g. 'B3' or 'A3:D32'). You
+      only need to produce correct values within answer_position.
+    - spreadsheet_content: a preview of the first rows of the input.
+
+    You have two tools:
+    - run_python(code): execute a self-contained Python 3 snippet inside the
+      working directory. openpyxl and pandas are available. Each call runs in a
+      FRESH process (no variables persist between calls), so write a complete
+      script each time. The snippet's stdout+stderr is returned to you.
+    - submit(): call with no arguments once the spreadsheet at output_path is
+      final and correct. This ends the task and triggers grading of output_path
+      against the ground truth at answer_position.
+
+    Workflow:
+    1. Inspect the input with run_python (open the workbook, print shapes, the
+       relevant rows/columns, data types) so you understand the real structure.
+    2. Write code that reads spreadsheet_path, performs the manipulation, and
+       SAVES the result to the exact output_path. Re-run and verify.
+    3. Verify the answer_position cells hold the values you intend, then call submit().
+
+    Rules:
+    - Always save the FINAL workbook to output_path (not the input path).
+    - Reason briefly before each tool call. Take multiple steps when needed.
+    - Do not call submit() until output_path contains your verified answer.
+
+objective:
+  type: difficulty_zone
+  target_band: [0.0, 1.0]                 # no-op band; acceptance is driven by the
+                                          # 4-phase prompt (diagnose failure -> harness
+                                          # that raises SR via the recovery skill),
+                                          # judged in decide() -- matches alfworld
+  window: 20
+
+budget:
+  type: capped_adaptive
+  max_k: 1
+
+orchestrator:
+  task_id: spreadsheetbench-corpus
+  task_description: |
+    Reshape TRAIN spreadsheet tasks where the Policy is weak, within the
+    grading-integrity boundary, to elicit transferable manipulation skills.
+  n_iterations: 100                        # train 0..99; OVERRIDE via --n-tasks
+  max_episode_steps: 24
+  k_per_candidate: 5
+  rollout_concurrency: 3
+  base_seed: 0
+  task_id_stride: 1
+  task_id_base_offset: 0                    # train starts at 0; OVERRIDE via --task-offset
+  baseline_cache_dir: null                  # avoid an empty orig pool from cache hits
+  mutator_baseline_mode: full
+
+runner:
+  type: subprocess
+  timeout_seconds: 600
+
+storage:
+  trace_path: ./runs/{run_name}/traces.jsonl
+
+logging:
+  log_dir: ./runs/{run_name}
+  log_policy_calls: true
+  log_agent_calls: true
