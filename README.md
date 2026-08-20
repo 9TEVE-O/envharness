@@ -463,8 +463,7 @@ action and observation shapes.
 
 ## 🙏 Acknowledgements
 
-This work builds most directly on [**ReasoningBank**](https://arxiv.org/abs/2509.25140),
-and we are grateful for it.
+We adopt the memory design of [**ReasoningBank**](https://arxiv.org/abs/2509.25140) in our agent implementation, and we are grateful for their work.
 
 <!-- ## 💬 Citation
 
