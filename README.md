@@ -1,11 +1,11 @@
 # *EnvHarness*: A Programmable Infrastructure Layer for Agent Environments
 
-<!-- Check out our [paper](FILL_PAPER_URL) or [webpage](FILL_WEBPAGE_URL) for the details. -->
+Check out our [paper](https://arxiv.org/abs/2608.19880) or [webpage](https://envharness.com/) for the details.
 
-<!-- ## 🔥 Updates
+## 🔥 Updates
 
 <!-- FILL: one dated bullet per release / acceptance / follow-up, newest first. -->
-- [FILL-DATE] We released our [paper](FILL_PAPER_URL) and code. -->
+- [2026-08-21] We released our [paper](https://arxiv.org/abs/2608.19880) and [website](https://envharness.com/).
 
 ## 🏴󠁶󠁵󠁭󠁡󠁰󠁿 Overview
 
@@ -465,13 +465,21 @@ action and observation shapes.
 
 We adopt the memory design of [**ReasoningBank**](https://arxiv.org/abs/2509.25140) in our agent implementation, and we are grateful for their work.
 
-<!-- ## 💬 Citation
+## 💬 Citation
 
 If our work is useful for you, please consider citing our paper:
 
 ```
-FILL_BIBTEX
-``` -->
+@article{huang2026envharness,
+      title={EnvHarness: Awakening Static Worlds for Agent Learning}, 
+      author={Chengsong Huang and Zifeng Wang and Rujun Han and Jun Yan and Yanfei Chen and Zoey CuiZhu and Ke Jiang and Peng Xia and Han Yu and Yufan Zhuang and Yifei Ming and Jiaqi Pan and Bhavana Dalvi Mishra and Jiaxin Huang and Burak Gokturk and Tomas Pfister and Chen-Yu Lee},
+      year={2026},
+      eprint={2608.19880},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2608.19880}, 
+}
+```
 
 This is not an officially supported Google product. This project is not eligible for the
 [Google Open Source Software Vulnerability Rewards Program](https://bughunters.google.com/open-source-security).
