@@ -1,6 +1,6 @@
-# *EnvHarness*: A Programmable Infrastructure Layer for Agent Environments
+# *EnvHarness*: Awakening Static Worlds for Agent Learning
 
-Check out our [paper](https://arxiv.org/abs/2608.19880) or [webpage](https://envharness.com/) for the details.
+Check out our [paper](https://arxiv.org/abs/2608.19880) and [webpage](https://envharness.com/) for more details.
 
 ## 🔥 Updates
 
