@@ -1,0 +1,74 @@
+name: EnvHarness bounded gate
+
+on:
+  push:
+    branches:
+      - envharness-bounded-gate
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bounded-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact pinned upstream commit
+        uses: actions/checkout@v4
+        with:
+          ref: fab7d57441f06b75c73a900e04561d4d7600f361
+
+      - name: Verify pinned commit
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD)" = "fab7d57441f06b75c73a900e04561d4d7600f361"
+          git rev-parse HEAD
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dev dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Run upstream tests
+        run: pytest
+
+      - name: Run toy24 preflight
+        id: preflight
+        continue-on-error: true
+        run: python scripts/check_env.py toy24
+
+      - name: Run scripted toy24 baseline
+        run: |
+          python scripts/run_harness.py \
+            --scripted \
+            --in-process \
+            --run-name toy24-baseline
+
+      - name: Adversarial evaluate override
+        run: |
+          python - <<'PY'
+          from envharness.core.code_loader import load_rules_subclass
+          from envharness.harnesses.rules import Rules
+
+          code = '''
+          class _Rules(Rules):
+              def evaluate(self):
+                  return "OVERRIDDEN"
+          '''
+          cls = load_rules_subclass(code)
+          assert issubclass(cls, Rules)
+          inst = cls(inner=None)
+          result = inst.evaluate()
+          print(f"ADVERSARIAL_EVALUATE_OVERRIDE={result}")
+          assert result == "OVERRIDDEN"
+          PY
+
+      - name: Preserve preflight classification
+        if: always()
+        run: echo "TOY24_PREFLIGHT_OUTCOME=${{ steps.preflight.outcome }}"
