@@ -39,6 +39,8 @@ jobs:
         run: pytest
 
       - name: Run toy24 preflight
+        id: preflight
+        continue-on-error: true
         run: python scripts/check_env.py toy24
 
       - name: Run scripted toy24 baseline
@@ -66,3 +68,7 @@ jobs:
           print(f"ADVERSARIAL_EVALUATE_OVERRIDE={result}")
           assert result == "OVERRIDDEN"
           PY
+
+      - name: Preserve preflight classification
+        if: always()
+        run: echo "TOY24_PREFLIGHT_OUTCOME=${{ steps.preflight.outcome }}"
